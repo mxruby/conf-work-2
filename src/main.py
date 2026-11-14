@@ -1,8 +1,15 @@
-
 import argparse
+import gzip
+import lzma
 import os
+import re
 import sys
+from pathlib import Path
 from urllib.parse import urlparse
+from urllib.request import urlopen
+
+
+MIN_DEPTH = 1
 
 
 def positive_int(value):
@@ -15,7 +22,7 @@ def positive_int(value):
             "значение должно быть целым числом"
         )
 
-    if number < 1:
+    if number < MIN_DEPTH:
         raise argparse.ArgumentTypeError(
             "значение должно быть больше нуля"
         )
@@ -74,6 +81,8 @@ def valid_repository(value):
 
 
 def parse_arguments():
+    """Парсинг аргументов командной строки"""
+
     parser = argparse.ArgumentParser(
         description="Визуализатор графа зависимостей пакетов"
     )
@@ -108,14 +117,167 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def main():
-    args = parse_arguments()
+def load_repository(repository, test_mode):
+    """Загружает индекс пакетов из локального файла или URL."""
 
-    print("Параметры запуска:")
-    print(f"package = {args.package}")
-    print(f"repository = {args.repository}")
-    print(f"test_mode = {args.test_mode}")
-    print(f"max_depth = {args.max_depth}")
+    if not test_mode:
+        try:
+            with urlopen(repository, timeout=30) as response:
+                return response.read()
+
+        except Exception as error:
+            raise RuntimeError(
+                f"Ошибка загрузки репозитория: {error}"
+            )
+
+    path = Path(repository)
+
+    if path.is_dir():
+        candidates = [
+            path / "Packages.xz",
+            path / "Packages.gz",
+            path / "Packages"
+        ]
+
+        file_path = next(
+            (item for item in candidates if item.is_file()),
+            None
+        )
+
+        if file_path is None:
+            raise RuntimeError(
+                "В указанном каталоге не найден файл Packages"
+            )
+    else:
+        file_path = path
+
+    try:
+        return file_path.read_bytes()
+    except OSError as error:
+        raise RuntimeError(
+            f"Ошибка чтения файла: {error}"
+        )
+
+
+def decompress_repository(data, repository):
+    """Распаковывает индекс пакетов при необходимости."""
+
+    path = urlparse(repository).path.lower()
+
+    try:
+        if path.endswith(".xz"):
+            data = lzma.decompress(data)
+
+        elif path.endswith(".gz"):
+            data = gzip.decompress(data)
+
+        return data.decode("utf-8")
+
+    except (lzma.LZMAError, gzip.BadGzipFile,
+            EOFError, UnicodeDecodeError) as error:
+        raise RuntimeError(
+            f"Ошибка распаковки индекса пакетов: {error}"
+        )
+
+
+def parse_packages(data):
+    """Разбирает записи пакетов из индекса Packages."""
+
+    packages = {}
+    current_package = {}
+    current_field = None
+
+    for line in data.splitlines():
+        if not line:
+            if "Package" in current_package:
+                packages[current_package["Package"]] = current_package
+
+            current_package = {}
+            current_field = None
+            continue
+
+        if line.startswith((" ", "\t")):
+            if current_field and current_field in current_package:
+                current_package[current_field] += " " + line.strip()
+            continue
+
+        if ":" in line:
+            field, value = line.split(":", 1)
+            current_field = field
+            current_package[field] = value.strip()
+
+    if "Package" in current_package:
+        packages[current_package["Package"]] = current_package
+
+    return packages
+
+
+def extract_dependencies(package_info):
+    dependencies = []
+
+    for field in ("Pre-Depends", "Depends"):
+        value = package_info.get(field, "")
+
+        if not value:
+            continue
+
+        groups = value.split(",")
+
+        for group in groups:
+            alternatives = group.split("|")
+
+            for alternative in alternatives:
+                match = re.match(
+                    r"\s*([a-z0-9][a-z0-9+.-]*)",
+                    alternative
+                )
+
+                if match:
+                    name = match.group(1)
+
+                    if name not in dependencies:
+                        dependencies.append(name)
+
+    return dependencies
+
+
+def main():
+    """Основная программа"""
+
+    args = parse_arguments()
+    try:
+        if args.test_mode:
+            if urlparse(args.repository).scheme:
+                raise RuntimeError(
+                    "В локальном режиме необходимо указать путь к файлу"
+                )
+        elif not urlparse(args.repository).scheme:
+            raise RuntimeError(
+                "В удалённом режиме необходимо указать URL"
+            )
+        raw_data = load_repository(args.repository, args.test_mode)
+        data = decompress_repository(raw_data, args.repository)
+
+        packages = parse_packages(data)
+
+        if args.package not in packages:
+            raise RuntimeError(
+                f"Пакет '{args.package}' не найден в репозитории"
+            )
+
+        dependencies = extract_dependencies(packages[args.package])
+
+        print(f"Прямые зависимости пакета {args.package}:")
+
+        if dependencies:
+            for dependency in dependencies:
+                print(f"- {dependency}")
+        else:
+            print("Зависимости отсутствуют.")
+
+    except RuntimeError as error:
+        print(f"Ошибка: {error}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
