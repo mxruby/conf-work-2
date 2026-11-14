@@ -1,0 +1,1 @@
+call tests/stage_1.bat
