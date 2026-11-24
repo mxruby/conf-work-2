@@ -1,9 +1,9 @@
 import argparse
 import gzip
 import lzma
-import os
 import re
 import sys
+from collections import deque
 from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import urlopen
@@ -47,35 +47,20 @@ def valid_package_name(value):
 
 
 def valid_repository(value):
-    """Проверяет URL или путь к репозиторию."""
-
     if not value.strip():
         raise argparse.ArgumentTypeError(
-            "путь или URL не может быть пустым"
+            "источник репозитория не может быть пустым"
         )
 
     parsed = urlparse(value)
 
     if parsed.scheme:
-        if parsed.scheme not in ("http", "https"):
-            raise argparse.ArgumentTypeError(
-                "поддерживаются только URL с http или https"
-            )
-
-        if not parsed.netloc:
-            raise argparse.ArgumentTypeError(
-                "указан некорректный URL"
-            )
-    else:
-        if not os.path.exists(value):
-            raise argparse.ArgumentTypeError(
-                "указанный путь не существует"
-            )
-
-        if not os.path.isfile(value) and not os.path.isdir(value):
-            raise argparse.ArgumentTypeError(
-                "путь должен указывать на файл или каталог"
-            )
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise argparse.ArgumentTypeError("некорректный URL")
+    elif not Path(value).exists():
+        raise argparse.ArgumentTypeError(
+            "указанный файл не существует"
+        )
 
     return value
 
@@ -117,46 +102,59 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def load_repository(repository, test_mode):
-    """Загружает индекс пакетов из локального файла или URL."""
+def load_remote_repository(url):
+    try:
+        with urlopen(url, timeout=30) as response:
+            data = response.read()
 
-    if not test_mode:
-        try:
-            with urlopen(repository, timeout=30) as response:
-                return response.read()
-
-        except Exception as error:
-            raise RuntimeError(
-                f"Ошибка загрузки репозитория: {error}"
-            )
-
-    path = Path(repository)
-
-    if path.is_dir():
-        candidates = [
-            path / "Packages.xz",
-            path / "Packages.gz",
-            path / "Packages"
-        ]
-
-        file_path = next(
-            (item for item in candidates if item.is_file()),
-            None
+    except Exception as error:
+        raise RuntimeError(
+            f"Ошибка загрузки репозитория: {error}"
         )
-
-        if file_path is None:
-            raise RuntimeError(
-                "В указанном каталоге не найден файл Packages"
-            )
-    else:
-        file_path = path
 
     try:
-        return file_path.read_bytes()
+        path = urlparse(url).path.lower()
+
+        if path.endswith(".gz"):
+            data = gzip.decompress(data)
+        elif path.endswith(".xz"):
+            data = lzma.decompress(data)
+
+        return data.decode("utf-8")
+
+    except (OSError, EOFError, UnicodeDecodeError) as error:
+        raise RuntimeError(
+            f"Ошибка обработки индекса: {error}"
+        )
+
+
+def load_test_repository(path):
+    """Читает тестовый репозиторий в формате Packages."""
+
+    try:
+        return Path(path).read_text(encoding="utf-8")
     except OSError as error:
         raise RuntimeError(
-            f"Ошибка чтения файла: {error}"
+            f"Ошибка чтения тестового репозитория: {error}"
         )
+
+
+def validate_test_repository(packages):
+    """Проверяет формат тестового репозитория."""
+
+    for package, info in packages.items():
+        if not re.fullmatch(r"[A-Z]+", package):
+            raise RuntimeError(
+                f"Некорректное имя пакета: {package}"
+            )
+
+        dependencies = extract_dependencies(info)
+
+        for dependency in dependencies:
+            if not re.fullmatch(r"[A-Z]+", dependency):
+                raise RuntimeError(
+                    f"Некорректное имя зависимости: {dependency}"
+                )
 
 
 def decompress_repository(data, repository):
@@ -212,6 +210,13 @@ def parse_packages(data):
     return packages
 
 
+def get_dependencies(package, repository):
+    if package not in repository:
+        return []
+
+    return extract_dependencies(repository[package])
+
+
 def extract_dependencies(package_info):
     dependencies = []
 
@@ -228,7 +233,7 @@ def extract_dependencies(package_info):
 
             for alternative in alternatives:
                 match = re.match(
-                    r"\s*([a-z0-9][a-z0-9+.-]*)",
+                    r"\s*([A-Za-z0-9][A-Za-z0-9+.-]*)",
                     alternative
                 )
 
@@ -241,6 +246,47 @@ def extract_dependencies(package_info):
     return dependencies
 
 
+def build_graph(start_package, repository, max_depth):
+    graph = {}
+
+    queue = deque()
+    queue.append((start_package, 0))
+
+    visited = {start_package}
+
+    while queue:
+        current_package, depth = queue.popleft()
+
+        graph[current_package] = []
+
+        if depth >= max_depth:
+            continue
+
+        dependencies = get_dependencies(
+            current_package,
+            repository
+        )
+
+        graph[current_package] = dependencies
+
+        for dependency in dependencies:
+            if dependency not in visited:
+                visited.add(dependency)
+                queue.append((dependency, depth + 1))
+
+    return graph
+
+
+def print_graph(graph):
+    print("\nГраф зависимостей:")
+
+    for package, dependencies in graph.items():
+        if dependencies:
+            print(f"{package} -> {', '.join(dependencies)}")
+        else:
+            print(f"{package} -> нет зависимостей")
+
+
 def main():
     """Основная программа"""
 
@@ -249,31 +295,46 @@ def main():
         if args.test_mode:
             if urlparse(args.repository).scheme:
                 raise RuntimeError(
-                    "В локальном режиме необходимо указать путь к файлу"
+                    "В тестовом режиме необходимо указать путь к файлу"
                 )
-        elif not urlparse(args.repository).scheme:
-            raise RuntimeError(
-                "В удалённом режиме необходимо указать URL"
-            )
-        raw_data = load_repository(args.repository, args.test_mode)
-        data = decompress_repository(raw_data, args.repository)
 
-        packages = parse_packages(data)
+            if not Path(args.repository).is_file():
+                raise RuntimeError(
+                    "Тестовый репозиторий должен быть файлом"
+                )
 
-        if args.package not in packages:
-            raise RuntimeError(
-                f"Пакет '{args.package}' не найден в репозитории"
-            )
+            data = load_test_repository(args.repository)
+            repository = parse_packages(data)
 
-        dependencies = extract_dependencies(packages[args.package])
+            validate_test_repository(repository)
 
-        print(f"Прямые зависимости пакета {args.package}:")
+            if not re.fullmatch(r"[A-Z]+", args.package):
+                raise RuntimeError(
+                    "В тестовом режиме имя пакета должно состоять "
+                    "из больших латинских букв"
+                )
 
-        if dependencies:
-            for dependency in dependencies:
-                print(f"- {dependency}")
         else:
-            print("Зависимости отсутствуют.")
+            if not urlparse(args.repository).scheme:
+                raise RuntimeError(
+                    "В удалённом режиме необходимо указать URL"
+                )
+
+            data = load_remote_repository(args.repository)
+            repository = parse_packages(data)
+
+        if args.package not in repository:
+            raise RuntimeError(
+                f"Пакет {args.package} не найден в репозитории"
+            )
+
+        graph = build_graph(
+            args.package,
+            repository,
+            args.max_depth
+        )
+
+        print_graph(graph)
 
     except RuntimeError as error:
         print(f"Ошибка: {error}", file=sys.stderr)

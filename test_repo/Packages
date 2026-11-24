@@ -1,0 +1,22 @@
+Package: A
+Depends: B, C
+
+Package: B
+Depends: D
+
+Package: C
+Depends: D, E
+
+Package: D
+Depends: A
+
+Package: E
+Depends: F
+
+Package: F
+
+Package: G
+Depends: H
+
+Package: H
+Depends: G
