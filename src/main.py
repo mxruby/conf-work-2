@@ -73,36 +73,33 @@ def parse_arguments():
     )
 
     parser.add_argument(
-        "--package",
-        required=True,
-        type=valid_package_name,
+        "--package", required=True, type=valid_package_name,
         help="имя анализируемого пакета"
     )
 
     parser.add_argument(
-        "--repository",
-        required=True,
-        type=valid_repository,
+        "--repository", required=True, type=valid_repository,
         help="URL репозитория или путь к тестовому репозиторию"
     )
 
     parser.add_argument(
-        "--test-mode",
-        action="store_true",
+        "--test-mode", action="store_true",
         help="режим работы с тестовым репозиторием"
     )
 
     parser.add_argument(
-        "--max-depth",
-        type=positive_int,
-        default=3,
+        "--max-depth", type=positive_int, default=3,
         help="максимальная глубина анализа (по умолчанию: 3)"
     )
 
     parser.add_argument(
-        "--reverse",
-        action="store_true",
+        "--reverse", action="store_true",
         help="Показать обратные зависимости пакета"
+    )
+
+    parser.add_argument(
+        "--visualize", action="store_true",
+        help="Вывести граф зависимостей в формате D2"
     )
 
     return parser.parse_args()
@@ -307,6 +304,32 @@ def build_reverse_graph(start_package, repository):
     return reverse_dependencies
 
 
+def generate_d2(graph):
+    """Преобразует словарь графа зависимостей в описание D2."""
+
+    lines = []
+    nodes = {}
+
+    packages = set(graph.keys())
+
+    for dependencies in graph.values():
+        packages.update(dependencies)
+
+    for index, package in enumerate(sorted(packages)):
+        nodes[package] = f"node_{index}"
+        lines.append(
+            f'{nodes[package]}: {{ label: "{package}" }}'
+        )
+
+    for package, dependencies in graph.items():
+        for dependency in dependencies:
+            lines.append(
+                f"{nodes[package]} -> {nodes[dependency]}"
+            )
+
+    return "\n".join(lines)
+
+
 def main():
     """Основная программа"""
 
@@ -342,36 +365,45 @@ def main():
 
             data = load_remote_repository(args.repository)
             repository = parse_packages(data)
-
-        if args.package not in repository:
-            raise RuntimeError(
-                f"Пакет {args.package} не найден в репозитории"
-            )
-
-        if args.reverse:
-            dependencies = build_reverse_graph(
-                args.package,
-                repository
-            )
-
-            print(f"Обратные зависимости пакета {args.package}:")
-
-            if dependencies:
-                print(", ".join(dependencies))
-            else:
-                print("Нет обратных зависимостей")
-        else:
-            graph = build_graph(
-                args.package,
-                repository,
-                args.max_depth
-            )
-
-            print_graph(graph)
+        run(args, repository)
 
     except RuntimeError as error:
         print(f"Ошибка: {error}", file=sys.stderr)
         sys.exit(1)
+
+
+def run(args, repository):
+    if args.package not in repository:
+        raise RuntimeError(
+            f"Пакет {args.package} не найден в репозитории"
+        )
+
+    if args.reverse:
+        dependencies = build_reverse_graph(
+            args.package,
+            repository
+        )
+
+        print(f"Обратные зависимости пакета {args.package}:")
+
+        if dependencies:
+            print(", ".join(dependencies))
+        else:
+            print("Нет обратных зависимостей")
+    else:
+        graph = build_graph(
+            args.package,
+            repository,
+            args.max_depth
+        )
+
+        print_graph(graph)
+
+        if args.visualize:
+            d2_description = generate_d2(graph)
+
+            print("\nОписание графа на языке D2:")
+            print(d2_description)
 
 
 if __name__ == "__main__":
