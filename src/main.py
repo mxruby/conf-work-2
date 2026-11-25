@@ -99,6 +99,12 @@ def parse_arguments():
         help="максимальная глубина анализа (по умолчанию: 3)"
     )
 
+    parser.add_argument(
+        "--reverse",
+        action="store_true",
+        help="Показать обратные зависимости пакета"
+    )
+
     return parser.parse_args()
 
 
@@ -287,6 +293,20 @@ def print_graph(graph):
             print(f"{package} -> нет зависимостей")
 
 
+def build_reverse_graph(start_package, repository):
+    """Находит непосредственные обратные зависимости пакета."""
+
+    reverse_dependencies = []
+
+    for package, info in repository.items():
+        dependencies = extract_dependencies(info)
+
+        if start_package in dependencies:
+            reverse_dependencies.append(package)
+
+    return reverse_dependencies
+
+
 def main():
     """Основная программа"""
 
@@ -328,13 +348,26 @@ def main():
                 f"Пакет {args.package} не найден в репозитории"
             )
 
-        graph = build_graph(
-            args.package,
-            repository,
-            args.max_depth
-        )
+        if args.reverse:
+            dependencies = build_reverse_graph(
+                args.package,
+                repository
+            )
 
-        print_graph(graph)
+            print(f"Обратные зависимости пакета {args.package}:")
+
+            if dependencies:
+                print(", ".join(dependencies))
+            else:
+                print("Нет обратных зависимостей")
+        else:
+            graph = build_graph(
+                args.package,
+                repository,
+                args.max_depth
+            )
+
+            print_graph(graph)
 
     except RuntimeError as error:
         print(f"Ошибка: {error}", file=sys.stderr)

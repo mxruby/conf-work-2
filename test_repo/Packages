@@ -5,7 +5,7 @@ Package: B
 Depends: D
 
 Package: C
-Depends: D, E
+Depends: D, F
 
 Package: D
 Depends: A

@@ -1,1 +1,1 @@
-call tests/stage_3.bat
+call tests/stage_4.bat
